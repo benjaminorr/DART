@@ -28,7 +28,7 @@ at **15.8 FPS** (4 classes, 1008px) on a single RTX 4080.
 
 ## Installation
 
-Tested on Windows 11, RTX 4080 16 GB. All commands use bash syntax.
+Tested on Windows 11 and Ubuntu, RTX 4080 16 GB. All commands use bash syntax.
 
 | Package | Version |
 |---------|---------|
