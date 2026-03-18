@@ -42,13 +42,17 @@ Tested on Windows 11, RTX 4080 16 GB. All commands use bash syntax.
 | numpy | < 2.0 |
 
 ```bash
-# 1. Install PyTorch with CUDA
+# 1. Create a conda environment
+conda create -n dartsam3 python=3.11 -y
+conda activate dartsam3
+
+# 2. Install PyTorch with CUDA
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
 
-# 2. Install TensorRT (optional — only needed for TRT engine export/inference)
+# 3. Install TensorRT (optional — only needed for TRT engine export/inference)
 pip install tensorrt
 
-# 3. Install DART (installs all other dependencies automatically)
+# 4. Install DART (installs all other dependencies automatically)
 pip install -e .
 ```
 
