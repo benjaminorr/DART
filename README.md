@@ -26,6 +26,7 @@ Distilled student backbones and pre-built weights are available on
 - [FP16 Precision Analysis](#fp16-precision-analysis)
 - [Scripts Reference](#scripts-reference)
 - [Troubleshooting](#troubleshooting)
+- [Citation](#citation)
 
 ---
 
@@ -761,3 +762,19 @@ ONNX path. All provided scripts handle this automatically.
 TRT 10.x has no FP16 implementation for fused `Conv+Gelu` kernels.
 `export_student_trt.py` inserts Identity nodes to break the fusion pattern
 automatically. If building manually, use FP32 or add Identity nodes.
+
+## Citation
+
+If you find DART useful in your research or applications, please cite it as:
+
+```bibtex
+@misc{turkcan2026detectrealtimesingleprompt,
+      title={Detect Anything in Real Time: From Single-Prompt Segmentation to Multi-Class Detection},
+      author={Mehmet Kerem Turkcan},
+      year={2026},
+      eprint={2603.11441},
+      archivePrefix={arXiv},
+      primaryClass={cs.CV},
+      url={https://arxiv.org/abs/2603.11441},
+}
+```
