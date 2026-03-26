@@ -324,7 +324,87 @@ def export_split_onnx(output_dir, split_block, imgsz=1008, mask_blocks=None):
     return onnx_part1, onnx_part2
 
 
-def export_onnx(output_dir, imgsz=1008, mask_blocks=None, skip_blocks=None):
+def _load_pruned_checkpoint_into_hf(vision_encoder, pruned_checkpoint_path):
+    """Convert Meta-format pruned checkpoint weights to HF format and load them.
+
+    The Meta vision_backbone uses fused QKV (``attn.qkv``) while HF uses
+    separate ``q_proj``, ``k_proj``, ``v_proj``.  Keys like ``trunk.blocks.N.*``
+    map to ``backbone.layers.N.*`` and ``convs.*`` maps to ``neck.*``.
+
+    Returns the skip_blocks set from the checkpoint metadata.
+    """
+    import torch
+    from sam3.model_builder import build_sam3_image_model
+
+    print(f"  Loading pruned checkpoint: {pruned_checkpoint_path}")
+    ckpt = torch.load(pruned_checkpoint_path, map_location="cpu", weights_only=False)
+    meta_sd = ckpt.get("pruned_state_dict", ckpt)
+    skip_blocks = set(ckpt.get("skip_blocks", []))
+    print(f"  Meta state_dict: {len(meta_sd)} keys, skip_blocks={sorted(skip_blocks)}")
+
+    # Build a Meta→HF key mapping by matching pretrained weight values.
+    # Both models are initialized from the same pretrained weights, so
+    # tensors with identical values can be matched unambiguously.
+    print("  Building Meta→HF key mapping from pretrained weights...")
+    meta_model = build_sam3_image_model(device="cpu", eval_mode=True)
+    meta_full_sd = meta_model.backbone.vision_backbone.state_dict()
+    hf_full_sd = vision_encoder.state_dict()
+
+    # Direct matches (non-QKV, non-freqs_cis, non-pos_embed)
+    # Compare on CPU to avoid device mismatch
+    mapping = {}  # meta_key -> hf_key (str) or (q_key, k_key, v_key) tuple
+    hf_used = set()
+    for mk, mv in meta_full_sd.items():
+        if "freqs_cis" in mk or "pos_embed" in mk:
+            continue
+        if ".attn.qkv." in mk:
+            continue
+        mv_cpu = mv.float().cpu()
+        for hk, hv in hf_full_sd.items():
+            if hk in hf_used:
+                continue
+            if mv.shape == hv.shape and torch.allclose(mv_cpu, hv.float().cpu(), atol=1e-5):
+                mapping[mk] = hk
+                hf_used.add(hk)
+                break
+
+    # QKV split mapping: trunk.blocks.N.attn.qkv -> backbone.layers.N.attention.{q,k,v}_proj
+    for block_idx in range(32):
+        for suffix in ("weight", "bias"):
+            meta_key = f"trunk.blocks.{block_idx}.attn.qkv.{suffix}"
+            mapping[meta_key] = (
+                f"backbone.layers.{block_idx}.attention.q_proj.{suffix}",
+                f"backbone.layers.{block_idx}.attention.k_proj.{suffix}",
+                f"backbone.layers.{block_idx}.attention.v_proj.{suffix}",
+            )
+
+    print(f"  Mapping: {len(mapping)} entries ({sum(1 for v in mapping.values() if isinstance(v, str))} direct + {sum(1 for v in mapping.values() if isinstance(v, tuple))} QKV splits)")
+    del meta_model, meta_full_sd  # free memory
+
+    # Convert pruned weights using the mapping
+    converted = {}
+    for mk, mv in meta_sd.items():
+        if mk not in mapping:
+            continue
+        target = mapping[mk]
+        if isinstance(target, tuple):
+            q, k, v = mv.chunk(3, dim=0)
+            converted[target[0]] = q
+            converted[target[1]] = k
+            converted[target[2]] = v
+        else:
+            converted[target] = mv
+
+    missing, unexpected = vision_encoder.load_state_dict(converted, strict=False)
+    print(f"  Loaded {len(converted)} HF keys ({len(missing)} missing — pruned blocks + RoPE)")
+    if unexpected:
+        print(f"  WARNING: {len(unexpected)} unexpected keys")
+
+    return skip_blocks
+
+
+def export_onnx(output_dir, imgsz=1008, mask_blocks=None, skip_blocks=None,
+                pruned_checkpoint=None):
     """Export HF SAM3 backbone to ONNX via dynamo."""
     from transformers.models.sam3 import Sam3Model
 
@@ -352,6 +432,17 @@ def export_onnx(output_dir, imgsz=1008, mask_blocks=None, skip_blocks=None):
         "facebook/sam3", attn_implementation="eager", **kwargs
     ).cpu()
     model.eval()
+
+    # Load distilled weights from a pruned checkpoint (Meta→HF conversion)
+    if pruned_checkpoint:
+        print(f"Loading distilled weights from pruned checkpoint...")
+        ckpt_skip = _load_pruned_checkpoint_into_hf(
+            model.vision_encoder, pruned_checkpoint
+        )
+        # Use skip_blocks from checkpoint if not explicitly provided
+        if skip_blocks is None and ckpt_skip:
+            skip_blocks = ckpt_skip
+            print(f"  Auto-set skip_blocks from checkpoint: {sorted(skip_blocks)}")
 
     # Apply block masking before export
     if mask_blocks:
@@ -456,7 +547,8 @@ def build_engine(onnx_path: str, output_path: str):
     return output_path
 
 
-def run_pytorch_reference(image_path, imgsz=1008, mask_blocks=None, skip_blocks=None):
+def run_pytorch_reference(image_path, imgsz=1008, mask_blocks=None, skip_blocks=None,
+                          pruned_checkpoint=None):
     """Run HF SAM3 vision encoder in PyTorch, return FPN outputs + pixel_values."""
     from transformers.models.sam3 import Sam3Processor, Sam3Model
     from PIL import Image
@@ -480,6 +572,15 @@ def run_pytorch_reference(image_path, imgsz=1008, mask_blocks=None, skip_blocks=
     model = Sam3Model.from_pretrained("facebook/sam3", **kwargs).cuda()
     processor = Sam3Processor.from_pretrained("facebook/sam3")
     model.eval()
+
+    # Load distilled weights if provided (must match the TRT engine weights)
+    if pruned_checkpoint:
+        print(f"  Loading distilled weights for reference...")
+        ckpt_skip = _load_pruned_checkpoint_into_hf(
+            model.vision_encoder, pruned_checkpoint
+        )
+        if skip_blocks is None and ckpt_skip:
+            skip_blocks = ckpt_skip
 
     # Apply same mask_blocks as the export for fair comparison
     if mask_blocks:
@@ -647,6 +748,12 @@ def main():
         "--skip-blocks", type=str, default=None,
         help="Comma-separated block indices to skip entirely, e.g. '5,10,12,14'",
     )
+    parser.add_argument(
+        "--pruned-checkpoint", type=str, default=None,
+        help="Path to pruned checkpoint (.pt) from self-distillation. "
+             "Loads distilled weights (Meta→HF conversion) and auto-applies "
+             "skip_blocks from checkpoint metadata.",
+    )
     args = parser.parse_args()
 
     # Validate imgsz
@@ -740,7 +847,8 @@ def main():
     # Step 1: Export ONNX
     if not args.skip_export:
         onnx_path = export_onnx(onnx_dir, imgsz=args.imgsz,
-                                mask_blocks=mask_blocks, skip_blocks=skip_blocks)
+                                mask_blocks=mask_blocks, skip_blocks=skip_blocks,
+                                pruned_checkpoint=args.pruned_checkpoint)
     else:
         print(f"Skipping ONNX export, using: {onnx_path}")
 
@@ -753,7 +861,7 @@ def main():
     # Step 3: PyTorch reference
     pixel_values, ref_fpn, pytorch_ms = run_pytorch_reference(
         args.image, imgsz=args.imgsz, mask_blocks=mask_blocks,
-        skip_blocks=skip_blocks,
+        skip_blocks=skip_blocks, pruned_checkpoint=args.pruned_checkpoint,
     )
 
     # Step 4: TRT inference
