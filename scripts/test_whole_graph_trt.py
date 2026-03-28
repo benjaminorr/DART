@@ -19,18 +19,31 @@ import torch
 import numpy as np
 
 
-def export_onnx(prompt: str, output_dir: str = "onnx_whole"):
+def export_onnx(prompt: str, output_dir: str = "onnx_whole", checkpoint_path: str = None):
     """Export whole SAM3 model to ONNX with baked-in prompt."""
     from transformers.models.sam3 import Sam3Processor, Sam3Model
     from PIL import Image
 
-    print("Loading HuggingFace SAM3 model (eager attention for ONNX compat)...")
+    if checkpoint_path:
+        print(f"Loading SAM3 model from checkpoint: {checkpoint_path}")
+    else:
+        print("Loading HuggingFace SAM3 model (eager attention for ONNX compat)...")
     # Export on CPU for compat; use eager attention — SDPA segfaults during
     # torch.onnx.export tracing in newer transformers versions
     device = "cpu"
+    # When using local checkpoint, load from cache only (no downloads)
     model = Sam3Model.from_pretrained(
-        "facebook/sam3", attn_implementation="eager"
+        "facebook/sam3",
+        attn_implementation="eager",
+        local_files_only=checkpoint_path is not None
     ).to(device)
+    
+    # Load weights from checkpoint if provided
+    if checkpoint_path:
+        state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+        model.load_state_dict(state_dict, strict=False)
+        print(f"  Loaded weights from {checkpoint_path}")
+    
     processor = Sam3Processor.from_pretrained("facebook/sam3")
     model.eval()
 
@@ -150,13 +163,27 @@ def build_engine(onnx_path: str, output_path: str):
     return output_path
 
 
-def run_pytorch_reference(image_path: str, prompt: str):
+def run_pytorch_reference(image_path: str, prompt: str, checkpoint_path: str = None):
     """Run HF SAM3 in PyTorch and return outputs for comparison."""
     from transformers.models.sam3 import Sam3Processor, Sam3Model
     from PIL import Image
 
-    print("Running PyTorch reference...")
-    model = Sam3Model.from_pretrained("facebook/sam3").to("cuda")
+    if checkpoint_path:
+        print(f"Running PyTorch reference (checkpoint: {checkpoint_path})...")
+    else:
+        print("Running PyTorch reference...")
+    # When using local checkpoint, load from cache only (no downloads)
+    model = Sam3Model.from_pretrained(
+        "facebook/sam3",
+        local_files_only=checkpoint_path is not None
+    ).to("cuda")
+    
+    # Load weights from checkpoint if provided
+    if checkpoint_path:
+        state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+        model.load_state_dict(state_dict, strict=False)
+        print(f"  Loaded weights from {checkpoint_path}")
+    
     processor = Sam3Processor.from_pretrained("facebook/sam3")
     model.eval()
 
@@ -267,13 +294,15 @@ def main():
                         help="ONNX output directory")
     parser.add_argument("--engine", default="sam3_whole_fp16.engine",
                         help="TRT engine path")
+    parser.add_argument("--checkpoint", type=str, default=None,
+                        help="Path to local SAM3 checkpoint (e.g., sam3.pt). If provided, bypasses HuggingFace download.")
     args = parser.parse_args()
 
     onnx_path = str(Path(args.onnx_dir) / "sam3_whole.onnx")
 
     # Step 1: Export ONNX
     if not args.skip_export:
-        onnx_path = export_onnx(args.prompt, args.onnx_dir)
+        onnx_path = export_onnx(args.prompt, args.onnx_dir, checkpoint_path=args.checkpoint)
     else:
         print(f"Skipping export, using: {onnx_path}")
 
@@ -284,7 +313,7 @@ def main():
         print(f"Skipping build, using: {args.engine}")
 
     # Step 3: PyTorch reference
-    pixel_values, ref_masks, ref_seg = run_pytorch_reference(args.image, args.prompt)
+    pixel_values, ref_masks, ref_seg = run_pytorch_reference(args.image, args.prompt, checkpoint_path=args.checkpoint)
 
     # Step 4: TRT inference
     trt_outputs, trt_ms = run_trt_engine(args.engine, pixel_values)
