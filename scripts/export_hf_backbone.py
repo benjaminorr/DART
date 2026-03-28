@@ -238,26 +238,16 @@ def _apply_skip_blocks(vision_encoder, skip_blocks):
     return count
 
 
-def export_split_onnx(output_dir, split_block, imgsz=1008, mask_blocks=None, checkpoint_path=None):
+def export_split_onnx(output_dir, split_block, imgsz=1008, mask_blocks=None):
     """Export HF SAM3 backbone as two ONNX models (Part1 + Part2) via dynamo."""
     from transformers.models.sam3 import Sam3Model
 
-    if checkpoint_path:
-        print(f"Loading SAM3 model from checkpoint: {checkpoint_path}")
-    else:
-        print(f"Loading HuggingFace SAM3 model for split export (split_block={split_block})...")
+    print(f"Loading HuggingFace SAM3 model for split export (split_block={split_block})...")
 
     kwargs = {}
-    # When using local checkpoint, load from cache only (no downloads)
-    if checkpoint_path:
-        kwargs["local_files_only"] = True
-    
     if imgsz != 1008:
         from transformers import AutoConfig
-        config = AutoConfig.from_pretrained(
-            "facebook/sam3",
-            local_files_only=checkpoint_path is not None
-        )
+        config = AutoConfig.from_pretrained("facebook/sam3")
         config.image_size = imgsz
         config.detector_config.image_size = imgsz
         config.detector_config.vision_config.backbone_config.image_size = imgsz
@@ -271,13 +261,6 @@ def export_split_onnx(output_dir, split_block, imgsz=1008, mask_blocks=None, che
     model = Sam3Model.from_pretrained(
         "facebook/sam3", attn_implementation="eager", **kwargs
     ).cpu()
-    
-    # Load weights from checkpoint if provided
-    if checkpoint_path:
-        state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-        model.load_state_dict(state_dict, strict=False)
-        print(f"  Loaded weights from {checkpoint_path}")
-    
     model.eval()
 
     if mask_blocks:
@@ -341,14 +324,11 @@ def export_split_onnx(output_dir, split_block, imgsz=1008, mask_blocks=None, che
     return onnx_part1, onnx_part2
 
 
-def export_onnx(output_dir, imgsz=1008, mask_blocks=None, skip_blocks=None, checkpoint_path=None):
+def export_onnx(output_dir, imgsz=1008, mask_blocks=None, skip_blocks=None):
     """Export HF SAM3 backbone to ONNX via dynamo."""
     from transformers.models.sam3 import Sam3Model
 
-    if checkpoint_path:
-        print(f"Loading SAM3 model from checkpoint: {checkpoint_path}")
-    else:
-        print("Loading HuggingFace SAM3 model (eager attention for ONNX compat)...")
+    print("Loading HuggingFace SAM3 model (eager attention for ONNX compat)...")
 
     # For non-default resolutions, update the vision config so that
     # rotary embeddings are computed for the correct spatial grid.
@@ -371,25 +351,7 @@ def export_onnx(output_dir, imgsz=1008, mask_blocks=None, skip_blocks=None, chec
     model = Sam3Model.from_pretrained(
         "facebook/sam3", attn_implementation="eager", **kwargs
     ).cpu()
-    
-    # Load weights from checkpoint if provided
-    if checkpoint_path:
-        state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-        model.load_state_dict(state_dict, strict=False)
-        print(f"  Loaded weights from {checkpoint_path}")
-    
     model.eval()
-
-    # Load distilled weights from a pruned checkpoint (Meta→HF conversion)
-    if pruned_checkpoint:
-        print(f"Loading distilled weights from pruned checkpoint...")
-        ckpt_skip = _load_pruned_checkpoint_into_hf(
-            model.vision_encoder, pruned_checkpoint
-        )
-        # Use skip_blocks from checkpoint if not explicitly provided
-        if skip_blocks is None and ckpt_skip:
-            skip_blocks = ckpt_skip
-            print(f"  Auto-set skip_blocks from checkpoint: {sorted(skip_blocks)}")
 
     # Apply block masking before export
     if mask_blocks:
@@ -494,28 +456,18 @@ def build_engine(onnx_path: str, output_path: str):
     return output_path
 
 
-def run_pytorch_reference(image_path, imgsz=1008, mask_blocks=None, skip_blocks=None, checkpoint_path=None):
+def run_pytorch_reference(image_path, imgsz=1008, mask_blocks=None, skip_blocks=None):
     """Run HF SAM3 vision encoder in PyTorch, return FPN outputs + pixel_values."""
     from transformers.models.sam3 import Sam3Processor, Sam3Model
     from PIL import Image
 
-    if checkpoint_path:
-        print(f"Running PyTorch reference (checkpoint: {checkpoint_path})...")
-    else:
-        print("Running PyTorch reference (HF backbone on CUDA)...")
+    print("Running PyTorch reference (HF backbone on CUDA)...")
 
     kwargs = {}
-    # When using local checkpoint, load from cache only (no downloads)
-    if checkpoint_path:
-        kwargs["local_files_only"] = True
-    
     if imgsz != 1008:
         from transformers import AutoConfig
 
-        config = AutoConfig.from_pretrained(
-            "facebook/sam3",
-            local_files_only=checkpoint_path is not None
-        )
+        config = AutoConfig.from_pretrained("facebook/sam3")
         config.image_size = imgsz
         config.detector_config.image_size = imgsz
         config.detector_config.vision_config.backbone_config.image_size = imgsz
@@ -526,24 +478,8 @@ def run_pytorch_reference(image_path, imgsz=1008, mask_blocks=None, skip_blocks=
         kwargs["config"] = config
 
     model = Sam3Model.from_pretrained("facebook/sam3", **kwargs).cuda()
-    
-    # Load weights from checkpoint if provided
-    if checkpoint_path:
-        state_dict = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-        model.load_state_dict(state_dict, strict=False)
-        print(f"  Loaded weights from {checkpoint_path}")
-    
     processor = Sam3Processor.from_pretrained("facebook/sam3")
     model.eval()
-
-    # Load distilled weights if provided (must match the TRT engine weights)
-    if pruned_checkpoint:
-        print(f"  Loading distilled weights for reference...")
-        ckpt_skip = _load_pruned_checkpoint_into_hf(
-            model.vision_encoder, pruned_checkpoint
-        )
-        if skip_blocks is None and ckpt_skip:
-            skip_blocks = ckpt_skip
 
     # Apply same mask_blocks as the export for fair comparison
     if mask_blocks:
@@ -711,10 +647,6 @@ def main():
         "--skip-blocks", type=str, default=None,
         help="Comma-separated block indices to skip entirely, e.g. '5,10,12,14'",
     )
-    parser.add_argument(
-        "--checkpoint", type=str, default=None,
-        help="Path to local SAM3 checkpoint (e.g., sam3.pt). If provided, bypasses HuggingFace download.",
-    )
     args = parser.parse_args()
 
     # Validate imgsz
@@ -748,7 +680,6 @@ def main():
         if not args.skip_export:
             onnx_part1, onnx_part2 = export_split_onnx(
                 onnx_dir, K, imgsz=args.imgsz, mask_blocks=mask_blocks,
-                checkpoint_path=args.checkpoint,
             )
         else:
             onnx_part1 = str(Path(onnx_dir) / "hf_backbone_part1.onnx")
@@ -768,7 +699,6 @@ def main():
         # Step 3: Benchmark both parts
         pixel_values, ref_fpn, pytorch_ms = run_pytorch_reference(
             args.image, imgsz=args.imgsz, mask_blocks=mask_blocks,
-            checkpoint_path=args.checkpoint,
         )
 
         print(f"\nBenchmarking Part1 engine: {engine_part1}")
@@ -810,8 +740,7 @@ def main():
     # Step 1: Export ONNX
     if not args.skip_export:
         onnx_path = export_onnx(onnx_dir, imgsz=args.imgsz,
-                                mask_blocks=mask_blocks, skip_blocks=skip_blocks,
-                                checkpoint_path=args.checkpoint)
+                                mask_blocks=mask_blocks, skip_blocks=skip_blocks)
     else:
         print(f"Skipping ONNX export, using: {onnx_path}")
 
@@ -824,7 +753,7 @@ def main():
     # Step 3: PyTorch reference
     pixel_values, ref_fpn, pytorch_ms = run_pytorch_reference(
         args.image, imgsz=args.imgsz, mask_blocks=mask_blocks,
-        skip_blocks=skip_blocks, checkpoint_path=args.checkpoint,
+        skip_blocks=skip_blocks,
     )
 
     # Step 4: TRT inference
