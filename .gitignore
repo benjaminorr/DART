@@ -218,3 +218,7 @@ __marimo__/
 
 # Checkpoint files
 *.pt
+
+# Slurm files
+*.err
+*.out
