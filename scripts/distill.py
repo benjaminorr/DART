@@ -201,6 +201,9 @@ def run_phase1(args):
     torch.cuda.empty_cache()
     dist_print(f"\nFreed non-backbone teacher components to save VRAM")
 
+    if args.resume:
+        trainer.resume_from_checkpoint(args.resume)
+
     trainer.train()
 
 
@@ -304,6 +307,9 @@ def run_phase2(args):
     torch.cuda.empty_cache()
     dist_print(f"\nFreed non-backbone teacher components to save VRAM")
 
+    if args.resume:
+        trainer.resume_from_checkpoint(args.resume)
+
     trainer.train()
 
 
@@ -386,6 +392,9 @@ def run_prune(args):
         device=device,
         skip_blocks=skip_blocks,
     )
+
+    if args.resume:
+        trainer.resume_from_checkpoint(args.resume)
 
     trainer.train()
 
@@ -510,6 +519,12 @@ def main():
     parser.add_argument(
         "--lora-rank", type=int, default=0,
         help="LoRA rank for phase 2 backbone fine-tuning (0=full fine-tune)"
+    )
+
+    # Resume from checkpoint
+    parser.add_argument(
+        "--resume", type=str, default=None,
+        help="Path to checkpoint to resume training from (e.g., distill_checkpoints/adapter_epoch50.pt)"
     )
 
     # Test mode

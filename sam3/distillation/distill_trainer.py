@@ -424,6 +424,9 @@ class DistillationTrainer:
             "loss": loss,
             "adapter_state_dict": adapter_state,
             "student_state_dict": self._student_unwrapped.state_dict(),
+            "optimizer_state_dict": self.optimizer.state_dict(),
+            "scheduler_state_dict": self.scheduler.state_dict(),
+            "scaler_state_dict": self.scaler.state_dict(),
         }
         # Record teacher mask-blocks so inference can replay them
         if hasattr(self, "mask_blocks_str") and self.mask_blocks_str:
@@ -431,12 +434,52 @@ class DistillationTrainer:
         torch.save(ckpt, path)
         print(f"  Saved checkpoint: {path}")
 
+    def resume_from_checkpoint(self, checkpoint_path: str):
+        """Load training state from a checkpoint to resume training.
+
+        Args:
+            checkpoint_path: path to an adapter_epoch*.pt checkpoint
+        """
+        dist_print(f"Resuming from checkpoint: {checkpoint_path}")
+        ckpt = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+
+        # Restore model weights
+        self._student_unwrapped.load_state_dict(ckpt["student_state_dict"])
+        self.start_epoch = ckpt["epoch"]
+        dist_print(f"  Restored model weights from epoch {self.start_epoch}")
+
+        # Restore optimizer/scheduler/scaler if available (new-style checkpoints)
+        if "optimizer_state_dict" in ckpt:
+            self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+            self.scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+            self.scaler.load_state_dict(ckpt["scaler_state_dict"])
+            dist_print(f"  Restored optimizer, scheduler, and scaler state")
+        else:
+            # Old-style checkpoint without optimizer state — fast-forward scheduler
+            steps_per_epoch = len(self.dataloader)
+            steps_done = self.start_epoch * steps_per_epoch
+            dist_print(
+                f"  No optimizer state in checkpoint (old format). "
+                f"Fast-forwarding scheduler by {steps_done} steps."
+            )
+            for _ in range(steps_done):
+                self.scheduler.step()
+
     def train(self):
         """Run full training loop."""
+        start_epoch = getattr(self, "start_epoch", 0)
+        if start_epoch >= self.num_epochs:
+            dist_print(
+                f"Already completed {start_epoch}/{self.num_epochs} epochs. Nothing to do."
+            )
+            return
+
         dist_print(f"\nStarting distillation training...")
+        if start_epoch > 0:
+            dist_print(f"Resuming from epoch {start_epoch + 1}")
         dist_print(f"{'='*60}")
 
-        for epoch in range(self.num_epochs):
+        for epoch in range(start_epoch, self.num_epochs):
             t0 = time.perf_counter()
             avg_loss = self.train_epoch(epoch)
             elapsed = time.perf_counter() - t0

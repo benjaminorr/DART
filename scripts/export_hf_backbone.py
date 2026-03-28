@@ -380,6 +380,17 @@ def export_onnx(output_dir, imgsz=1008, mask_blocks=None, skip_blocks=None, chec
     
     model.eval()
 
+    # Load distilled weights from a pruned checkpoint (Meta→HF conversion)
+    if pruned_checkpoint:
+        print(f"Loading distilled weights from pruned checkpoint...")
+        ckpt_skip = _load_pruned_checkpoint_into_hf(
+            model.vision_encoder, pruned_checkpoint
+        )
+        # Use skip_blocks from checkpoint if not explicitly provided
+        if skip_blocks is None and ckpt_skip:
+            skip_blocks = ckpt_skip
+            print(f"  Auto-set skip_blocks from checkpoint: {sorted(skip_blocks)}")
+
     # Apply block masking before export
     if mask_blocks:
         print(f"Applying mask_blocks ({len(mask_blocks)} blocks)...")
@@ -524,6 +535,15 @@ def run_pytorch_reference(image_path, imgsz=1008, mask_blocks=None, skip_blocks=
     
     processor = Sam3Processor.from_pretrained("facebook/sam3")
     model.eval()
+
+    # Load distilled weights if provided (must match the TRT engine weights)
+    if pruned_checkpoint:
+        print(f"  Loading distilled weights for reference...")
+        ckpt_skip = _load_pruned_checkpoint_into_hf(
+            model.vision_encoder, pruned_checkpoint
+        )
+        if skip_blocks is None and ckpt_skip:
+            skip_blocks = ckpt_skip
 
     # Apply same mask_blocks as the export for fair comparison
     if mask_blocks:

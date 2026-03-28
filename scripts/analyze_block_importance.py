@@ -275,7 +275,7 @@ def run_analysis(
 
     # Suggest sweet spots
     print(f"\nSuggested configs:")
-    for n in [4, 8, 12, 16]:
+    for n in [4, 8, 12, 16, 24]:
         if n <= len(greedy_order):
             blocks = [b for b, _, _, _ in greedy_order[:n]]
             saved = sum(BLOCK_MS[b] for b in blocks)
@@ -314,8 +314,8 @@ def main():
         help="Batch size for forward passes"
     )
     parser.add_argument(
-        "--num-greedy", type=int, default=16,
-        help="Max blocks to remove in greedy search (default 16)"
+        "--num-greedy", type=int, default=24,
+        help="Max blocks to remove in greedy search (default 24)"
     )
     parser.add_argument(
         "--no-protect-global", action="store_true",
