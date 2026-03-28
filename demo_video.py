@@ -119,6 +119,52 @@ def draw_detections_cv2(frame_bgr, results, class_names, tracks=None):
     return frame_bgr
 
 
+def draw_masks_cv2(frame_bgr, results, class_names, mask_alpha=0.45):
+    """Draw only segmentation masks on an OpenCV BGR frame.
+
+    Args:
+        frame_bgr: BGR frame to annotate.
+        results: Detection results dict from predictor.predict().
+        class_names: Ordered list of class names for colour assignment.
+        mask_alpha: Opacity for mask overlay.
+    """
+    masks = results.get("masks")
+    if masks is None or len(results["scores"]) == 0:
+        return frame_bgr
+
+    h, w = frame_bgr.shape[:2]
+    overlay = frame_bgr.astype(np.float32)
+    mask_layer = np.zeros_like(overlay)
+    mask_weight = np.zeros((h, w, 1), dtype=np.float32)
+
+    n_colours = len(CLASS_COLOURS)
+    class_to_colour = {
+        name: CLASS_COLOURS[i % n_colours] for i, name in enumerate(class_names)
+    }
+
+    for i in range(len(results["scores"])):
+        cls_name = results["class_names"][i]
+        colour_rgb = class_to_colour.get(cls_name, CLASS_COLOURS[0])
+        colour_bgr = np.array(
+            [colour_rgb[2], colour_rgb[1], colour_rgb[0]], dtype=np.float32
+        )
+        mask = masks[i].cpu().numpy().astype(bool)
+
+        mask_layer[mask] += colour_bgr
+        mask_weight[mask] += 1.0
+
+    valid = mask_weight[..., 0] > 0
+    if not np.any(valid):
+        return frame_bgr
+
+    mask_layer[valid] /= mask_weight[valid]
+    blended = overlay.copy()
+    blended[valid] = (
+        overlay[valid] * (1.0 - mask_alpha) + mask_layer[valid] * mask_alpha
+    )
+    return blended.clip(0, 255).astype(np.uint8)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="SAM3 pipelined video processing"
@@ -173,6 +219,11 @@ def main():
     parser.add_argument(
         "--nms", type=float, default=0.7,
         help="NMS IoU threshold",
+    )
+    parser.add_argument(
+        "--overlay", type=str, default="boxes",
+        choices=["boxes", "masks", "both"],
+        help="Visualization mode: boxes, masks, or both",
     )
     parser.add_argument(
         "--output", "-o", type=str, default=None,
@@ -322,6 +373,20 @@ def main():
     else:
         print(f"Enc-dec:  PyTorch")
 
+    if args.trt_enc_dec and args.overlay != "boxes":
+        print(
+            "ERROR: --trt-enc-dec only supports detection-only inference, "
+            "so --overlay must be 'boxes'."
+        )
+        print(
+            "       To render segmentation masks, remove --trt-enc-dec "
+            "and use PyTorch enc-dec (keep --trt backbone if desired)."
+        )
+        sys.exit(1)
+
+    detection_only = args.overlay == "boxes"
+    print(f"Overlay: {args.overlay} (detection_only={detection_only})")
+
     # --- Load model ---
     text_cache_exists = args.text_cache and os.path.exists(args.text_cache)
     use_trt_only = (
@@ -387,7 +452,7 @@ def main():
         device=device,
         resolution=args.imgsz,
         use_fp16=True,
-        detection_only=True,
+        detection_only=detection_only,
         trt_engine_path=args.trt,
         compile_mode=args.compile if backbone_mode == "compile" else None,
         trt_enc_dec_engine_path=args.trt_enc_dec,
@@ -534,9 +599,13 @@ def main():
 
         # Annotate and write/display
         if writer is not None or args.display:
-            annotated = draw_detections_cv2(
-                frame_bgr.copy(), results, args.classes, tracks=tracks,
-            )
+            annotated = frame_bgr.copy()
+            if args.overlay in ("masks", "both"):
+                annotated = draw_masks_cv2(annotated, results, args.classes)
+            if args.overlay in ("boxes", "both"):
+                annotated = draw_detections_cv2(
+                    annotated, results, args.classes, tracks=tracks,
+                )
             if writer is not None:
                 writer.write(annotated)
             if args.display:
